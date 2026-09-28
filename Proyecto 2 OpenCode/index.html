@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StudyFlow - Panel de Estudio</title>
+  <!-- Supabase JS CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- Tesseract.js CDN para OCR -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 20px; background: #f1f5f9; color: #0f172a; }
+    h1 { margin-bottom: 20px; font-size: 1.5rem; text-align: center; }
+    .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1200px; margin: 0 auto; }
+    .card { background: #ffffff; padding: 20px; border-radius: 12px; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+    h2 { font-size: 1.1rem; margin-top: 0; border-bottom: 2px solid #f1f5f9; padding-bottom: 8px; }
+    
+    /* Controles y botones */
+    button { background: #2563eb; color: white; border: none; padding: 10px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+    button:hover { background: #1d4ed8; }
+    button.secondary { background: #059669; margin-top: 8px; }
+    button.secondary:hover { background: #047857; }
+    
+    /* Áreas de texto */
+    .ocr-box { background: #f8fafc; border: 1px solid #cbd5e1; padding: 12px; min-height: 220px; border-radius: 8px; white-space: pre-wrap; margin-top: 10px; max-height: 400px; overflow-y: auto; line-height: 1.5; }
+    textarea { width: 100%; height: 160px; font-family: inherit; margin-top: 8px; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; resize: vertical; }
+    .status { font-size: 0.85rem; color: #64748b; font-weight: 500; margin-top: 6px; }
+    .toolbar { margin-top: 10px; display: flex; justify-content: space-between; align-items: center; }
+  </style>
+</head>
+<body>
+
+  <h1>StudyFlow: Extractor OCR & Borrador de Respuestas</h1>
+
+  <div class="layout">
+    <!-- Panel Izquierdo: Fotocopia y Extracción OCR -->
+    <div class="card">
+      <h2>1. Texto de Fotocopia / Libro</h2>
+      <input type="file" id="inputImagen" accept="image/*">
+      <p id="estadoOCR" class="status">Sube una foto para procesar el texto.</p>
+      
+      <div id="textoExtraido" class="ocr-box" contenteditable="true">
+Seleccioná una imagen para extraer el texto. Cuando esté listo, vas a poder resaltar cualquier frase con el mouse y hacer clic en "Insertar cita en borrador".
+      </div>
+
+      <div class="toolbar">
+        <button type="button" onclick="insertarCitaEnBorrador()">📋 Insertar cita seleccionada en borrador</button>
+      </div>
+    </div>
+
+    <!-- Panel Derecho: Consignas y Espacio de Borrador -->
+    <div class="card">
+      <h2>2. Consignas y Borrador</h2>
+      <div>
+        <label><strong>Consigna actual:</strong></label>
+        <p style="margin: 6px 0; color: #334155;"><em>"¿Cuáles son las ideas principales del texto y cómo se relacionan entre sí?"</em></p>
+        
+        <label for="borradorRespuesta" style="display:block; margin-top: 12px; font-size: 0.9rem; font-weight: 600;">Escribí tu borrador aquí:</label>
+        <textarea id="borradorRespuesta" placeholder="Podés redactar tu respuesta e ir agregando citas del panel izquierdo..."></textarea>
+        
+        <button type="button" class="secondary" onclick="guardarBorrador()">💾 Guardar borrador en Supabase</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ========================================================
+    // REEMPLAZÁ ESTOS DATOS CON LOS DE TU PROYECTO DE SUPABASE
+    // ========================================================
+    const SUPABASE_URL = 'https://dtckmtbjtgxwiseoyndo.supabase.co';
+    const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR0Y2ttdGJqdGd4d2lzZW95bmRvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA2MDEyNDgsImV4cCI6MjEwNjE3NzI0OH0.rOvhRO9TekKcnyHCG5e__kMBcKPeRzTXbpSYZPID7Bs';
+    
+    // FIX 1: Inicialización correcta del cliente Supabase usando window.supabase
+    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    // FIX 2: Guardar última selección para que no se pierda al hacer clic en el botón
+    let ultimaSeleccion = '';
+    document.getElementById('textoExtraido').addEventListener('mouseup', () => {
+      const s = window.getSelection().toString().trim();
+      if (s) ultimaSeleccion = s;
+    });
+
+    // 1. Procesar OCR de la imagen subida
+    document.getElementById('inputImagen').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const estado = document.getElementById('estadoOCR');
+      const salida = document.getElementById('textoExtraido');
+      
+      estado.innerText = 'Procesando OCR (extraendo texto)... Esto puede demorar unos segundos.';
+      salida.innerText = '';
+
+      try {
+        const worker = await Tesseract.createWorker('spa');
+        const { data: { text } } = await worker.recognize(file);
+        await worker.terminate();
+
+        estado.innerText = '¡Texto extraído con éxito!';
+        salida.innerText = text;
+      } catch (err) {
+        estado.innerText = 'Error al procesar la imagen.';
+        console.error(err);
+      }
+    });
+
+    // 2. Transferir la cita seleccionada
+    function insertarCitaEnBorrador() {
+      const seleccion = window.getSelection().toString().trim() || ultimaSeleccion;
+      const areaBorrador = document.getElementById('borradorRespuesta');
+
+      if (!seleccion) {
+        alert('Primero seleccioná un fragmento de texto con el mouse en el panel izquierdo.');
+        return;
+      }
+
+      const formatoCita = `\n\n> [Cita]: "${seleccion}"\n`;
+      areaBorrador.value += formatoCita;
+      areaBorrador.focus();
+    }
+
+    // 3. Guardar borrador en Supabase usando supabaseClient
+    async function guardarBorrador() {
+      const borrador = document.getElementById('borradorRespuesta').value;
+
+      if (!borrador.trim()) {
+        alert('El borrador está vacío. Escribí algo antes de guardar.');
+        return;
+      }
+
+      const { data, error } = await supabaseClient
+        .from('consignas_respuestas')
+        .insert([{
+          consigna_numero: 1,
+          enunciado: '¿Cuáles son las ideas principales del texto y cómo se relacionan entre sí?',
+          borrador_texto: borrador,
+          estado: 'en_borrador'
+        }]);
+
+      if (error) {
+        alert('Error al guardar en la base de datos: ' + error.message);
+      } else {
+        alert('¡Borrador guardado correctamente en Supabase!');
+      }
+    }
+  </script>
+</body>
+</html>
